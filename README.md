@@ -1,6 +1,6 @@
 # 🚀 Autonomous TikTok Uploader Bot (2026 Ready)
 
-An advanced, autonomous engine designed to manage, moderate, and upload content to TikTok via Telegram. Powered by **Playwright**, this system utilizes persistent browser contexts to maintain active sessions and mimic human behavior, effectively bypassing modern bot detection.
+An advanced, autonomous engine designed to manage, moderate, and upload content to TikTok via Telegram. Powered by **Playwright**, this system utilizes persistent browser contexts to mimic human behavior and maintain active sessions, effectively bypassing modern bot detection.
 
 ---
 
@@ -40,9 +40,35 @@ Designed for public bots or community-driven content where safety is a priority.
 
 ---
 
-## ⚙️ Installation
+## ⚙️ Installation & Setup
 
 1. **Clone the repository:**
-   ```bash
    git clone [https://github.com/GeckCore/TikTok_Bot.git](https://github.com/GeckCore/TikTok_Bot.git)
    cd TikTok_Bot
+
+2. **Install Python dependencies:**
+   Make sure you have a requirements.txt with pyTelegramBotAPI and playwright.
+   pip install -r requirements.txt
+
+3. **Install Browser Engine (Playwright):**
+   This downloads the internal Chromium engine used to bypass bot detection.
+   python -m playwright install chromium
+
+4. **Linux Server / VPS Setup (Optional):**
+   If you are deploying on a headless server (e.g., Ubuntu), run this to install system dependencies:
+   python -m playwright install-deps
+
+5. **Configuration:**
+   Open your chosen script (normal_bot.py or Bot2.py) and update:
+   API_TOKEN: Your Telegram Bot Token.
+   ADMIN_ID: Your numerical Telegram ID for moderation.
+   ACCESS_KEY: Your secret password for /prem uploads.
+
+6. **First Run & Session Link:**
+   Run the bot locally first to link your TikTok account:
+   python Bot2.py
+
+   A browser window will open. Log in to TikTok manually. Once you are in your dashboard, close the browser. Your session is now saved in the browser_session folder.
+
+💡 Pro Tip: When moving to a Cloud Server, you MUST upload the browser_session folder along with your scripts. This allows the bot to stay logged in without needing a screen or manual passwords.
+   

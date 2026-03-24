@@ -1,0 +1,13 @@
+# Seguridad: Sesiones y Cookies
+browser_session/
+tiktok_session/
+tiktok_perfil_bot/
+
+# Ignorar vídeos descargados
+cola_videos/
+queue_videos/
+*.mp4
+
+# Ignorar archivos residuales de Python
+__pycache__/
+*.pyc

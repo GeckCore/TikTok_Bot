@@ -43,7 +43,7 @@ Designed for public bots or community-driven content where safety is a priority.
 ## ⚙️ Installation & Setup
 
 1. **Clone the repository:**
-   git clone [https://github.com/GeckCore/TikTok_Bot.git](https://github.com/GeckCore/TikTok_Bot.git)
+   git clone https://github.com/GeckCore/TikTok_Bot.git
    cd TikTok_Bot
 
 2. **Install Python dependencies:**
@@ -60,15 +60,14 @@ Designed for public bots or community-driven content where safety is a priority.
 
 5. **Configuration:**
    Open your chosen script (normal_bot.py or Bot2.py) and update:
-   API_TOKEN: Your Telegram Bot Token.
-   ADMIN_ID: Your numerical Telegram ID for moderation.
-   ACCESS_KEY: Your secret password for /prem uploads.
+   - API_TOKEN: Your Telegram Bot Token.
+   - ADMIN_ID: Your numerical Telegram ID for moderation.
+   - ACCESS_KEY: Your secret password for /prem uploads.
 
 6. **First Run & Session Link:**
    Run the bot locally first to link your TikTok account:
    python Bot2.py
 
-   A browser window will open. Log in to TikTok manually. Once you are in your dashboard, close the browser. Your session is now saved in the browser_session folder.
+   A browser window will open. **Log in to TikTok manually.** Once you are in your dashboard, close the browser. Your session is now saved in the `browser_session` folder.
 
-💡 Pro Tip: When moving to a Cloud Server, you MUST upload the browser_session folder along with your scripts. This allows the bot to stay logged in without needing a screen or manual passwords.
-   
+💡 **Pro Tip:** When moving to a Cloud Server, you **MUST** upload the `browser_session` folder along with your scripts. This allows the bot to stay logged in without needing a screen or manual passwords.

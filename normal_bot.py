@@ -1,5 +1,4 @@
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import os
 import time
 import threading
@@ -7,178 +6,168 @@ import random
 from collections import deque
 from playwright.sync_api import sync_playwright
 
-# --- CONFIG ---
-BOT_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'
-ADMIN_ID = "YOUR_TELEGRAM_USER_ID"
-PASS_PREM = "1234"
-HEADLESS_MODE = False 
+# --- CONFIGURACIÓN PRINCIPAL ---
+TOKEN_TELEGRAM = 'TU_TOKEN_AQUI' # ⚠️ Recuerda usar uno nuevo por seguridad
+PASSWORD_SISTEMA = "1234"
+MODO_OCULTO = False  # Cambia a True si no quieres ver cómo se abre el navegador
 
-PATH_BASE = os.path.dirname(os.path.abspath(__file__))
-VID_FOLDER = os.path.join(PATH_BASE, 'queue_videos')
-CHROME_DATA = os.path.join(PATH_BASE, "browser_session")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CARPETA_VIDEOS = os.path.join(BASE_DIR, 'cola_videos')
+PERFIL_DIR = os.path.join(BASE_DIR, "tiktok_perfil_bot")
 
-# Sync & Queues
-lock = threading.Lock()
-video_queue = deque()
-approval_state = {"status": "IDLE"}
+browser_lock = threading.Lock()
+cola_normal = deque()
 
-if not os.path.exists(VID_FOLDER):
-    os.makedirs(VID_FOLDER)
+if not os.path.exists(CARPETA_VIDEOS):
+    os.makedirs(CARPETA_VIDEOS)
 
-bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+bot = telebot.TeleBot(TOKEN_TELEGRAM, threaded=True)
 
-def reload_queue():
-    files = [f for f in os.listdir(VID_FOLDER) if f.endswith('.mp4')]
-    files.sort(key=lambda x: os.path.getmtime(os.path.join(VID_FOLDER, x)))
-    for f in files:
-        path = os.path.join(VID_FOLDER, f)
-        if path not in video_queue:
-            video_queue.append(path)
-    if video_queue:
-        print(f">> Restore: {len(video_queue)} items found in folder.")
-
-def request_moderation(vid_path):
-    approval_state["status"] = "WAITING"
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("✅ Post", callback_data="ok"),
-        InlineKeyboardButton("❌ Bin", callback_data="no")
-    )
+# --- SISTEMA DE AUTO-RECUPERACIÓN ---
+def recuperar_cola_perdida():
+    """Lee la carpeta y mete en cola los vídeos que se quedaron sin subir si el bot se reinicia."""
+    archivos = [f for f in os.listdir(CARPETA_VIDEOS) if f.endswith('.mp4')]
+    # Ordenar por fecha de creación (el más viejo primero)
+    archivos.sort(key=lambda x: os.path.getmtime(os.path.join(CARPETA_VIDEOS, x)))
     
-    try:
-        with open(vid_path, 'rb') as v:
-            bot.send_video(
-                ADMIN_ID, v, 
-                caption=f"🛡️ MODERATION\nFile: {os.path.basename(vid_path)}\nNext slot in 1 hour.", 
-                reply_markup=kb
-            )
-    except Exception as e:
-        print(f"!! Admin alert failed: {e}")
-        approval_state["status"] = "ERROR"
+    for archivo in archivos:
+        ruta = os.path.join(CARPETA_VIDEOS, archivo)
+        if ruta not in cola_normal:
+            cola_normal.append(ruta)
+    
+    if cola_normal:
+        print(f"[LOG] ♻️ Recuperados {len(cola_normal)} vídeos pendientes tras el reinicio.")
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_query(call):
-    if approval_state["status"] != "WAITING":
+# --- MOTOR DE SUBIDA (VERIFICACIÓN REAL) ---
+def subir_a_tiktok(video_path, es_premium=False):
+    tipo = "PREMIUM" if es_premium else "NORMAL"
+    
+    if not os.path.exists(video_path):
+        print(f"[LOG] ❌ ERROR: El archivo {video_path} ya no existe.")
         return
-        
-    if call.data == "ok":
-        approval_state["status"] = "APPROVED"
-        bot.edit_message_caption("✅ Approved. Posting in 60min.", call.message.chat.id, call.message.message_id)
-    elif call.data == "no":
-        approval_state["status"] = "REJECTED"
-        bot.edit_message_caption("❌ Rejected and deleted.", call.message.chat.id, call.message.message_id)
 
-def upload_engine(vid_path, priority=False):
-    tag = "PREM" if priority else "STD"
-    
-    if not os.path.exists(vid_path): return
-
-    with lock:
-        print(f"\n[RUN] [{tag}] Uploading: {os.path.basename(vid_path)}")
+    with browser_lock:
+        print(f"\n[LOG] [{tipo}] Iniciando subida para: {os.path.basename(video_path)}")
         try:
             with sync_playwright() as p:
-                ctx = p.chromium.launch_persistent_context(
-                    user_data_dir=CHROME_DATA,
-                    headless=HEADLESS_MODE,
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=PERFIL_DIR,
+                    headless=MODO_OCULTO,
                     channel="chrome",
                     args=["--disable-blink-features=AutomationControlled"]
                 )
                 
-                page = ctx.new_page()
-                page.goto("https://www.tiktok.com/creator-center/upload?lang=en", timeout=60000)
+                page = context.new_page()
+                page.goto("https://www.tiktok.com/creator-center/upload?lang=es", timeout=60000)
                 page.wait_for_timeout(5000)
                 
+                # Seguridad: Si pide login en modo automático, abortamos y salvamos el vídeo
                 if "login" in page.url:
-                    print(f"!! [{tag}] Session expired. Auth required.")
-                    if not priority: video_queue.appendleft(vid_path)
-                    ctx.close()
+                    print(f"[LOG] ❌ [{tipo}] ERROR CRÍTICO: TikTok ha cerrado la sesión.")
+                    print("Por favor, ejecuta el script de prueba Light manualmente para volver a loguearte.")
+                    if not es_premium: cola_normal.appendleft(video_path)
                     return
 
-                page.locator("input[type='file']").set_input_files(vid_path)
-                btn = page.locator('button:has-text("Post")').first
-                btn.wait_for(state="visible", timeout=30000)
+                print(f"[LOG] [{tipo}] Inyectando archivo...")
+                page.locator("input[type='file']").set_input_files(video_path)
                 
+                boton_publicar = page.locator('button:has-text("Publicar"), button:has-text("Post")').first
+                boton_publicar.wait_for(state="visible", timeout=30000)
+                
+                print(f"[LOG] [{tipo}] Esperando que el servidor procese el vídeo al 100%...")
                 for _ in range(300):
-                    if not btn.is_disabled(): break
+                    if not boton_publicar.is_disabled():
+                        break
                     time.sleep(1)
                 
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(1000)
-                btn.click(force=True)
                 
-                btn.wait_for(state="hidden", timeout=120000)
-                print(f">> [{tag}] Success: Posted.")
-                time.sleep(4)
-                ctx.close()
+                print(f"[LOG] [{tipo}] Clic en Publicar enviado. Verificando...")
+                boton_publicar.click(force=True)
+                
+                # Verificación de éxito real
+                boton_publicar.wait_for(state="hidden", timeout=120000)
+                print(f"[LOG] ✅ [{tipo}] ÉXITO: Pantalla de subida superada. Vídeo publicado.")
+                page.wait_for_timeout(4000)
 
-                if os.path.exists(vid_path):
-                    os.remove(vid_path)
+                # Borrado de limpieza tras subida exitosa
+                if os.path.exists(video_path):
+                    os.remove(video_path)
 
         except Exception as e:
-            print(f"!! [{tag}] Engine error: {e}")
-            if not priority: video_queue.appendleft(vid_path)
+            print(f"[LOG] ❌ [{tipo}] FALLO TÉCNICO: {e}")
+            # Si falla, se devuelve al principio de la cola para no perder el turno
+            if not es_premium:
+                cola_normal.appendleft(video_path)
 
-def scheduler_loop():
+# --- LÓGICA DE TIEMPOS (INTERVALOS ALEATORIOS) ---
+def hilo_programador_normal():
     while True:
-        wait_time = random.randint(18000, 25200)
-        pre_wait = wait_time - 3600
+        # Entre 5 y 7 horas (18000 y 25200 segundos)
+        segundos_espera = random.randint(18000, 25200)
+        horas = round(segundos_espera / 3600, 2)
+        print(f"\n[LOG] 🕒 Próximo vídeo normal programado en {horas} horas.")
         
-        print(f"** Next slot in {wait_time/3600:.2f}h. Moderation in {pre_wait/3600:.2f}h.")
-        time.sleep(pre_wait)
+        time.sleep(segundos_espera)
         
-        target_vid = None
-        while video_queue:
-            current = video_queue.popleft()
-            request_moderation(current)
-            
-            while approval_state["status"] == "WAITING":
-                time.sleep(2)
-                
-            if approval_state["status"] == "APPROVED":
-                target_vid = current
-                approval_state["status"] = "IDLE"
-                break
-            elif approval_state["status"] == "REJECTED":
-                if os.path.exists(current): os.remove(current)
-                approval_state["status"] = "IDLE"
-            elif approval_state["status"] == "ERROR":
-                video_queue.appendleft(current)
-                approval_state["status"] = "IDLE"
-                break
-
-        if target_vid:
-            time.sleep(3600)
-            upload_engine(target_vid)
+        if cola_normal:
+            video = cola_normal.popleft()
+            subir_a_tiktok(video, es_premium=False)
         else:
-            time.sleep(3600)
+            print("[LOG] Cola normal vacía. Se reinicia el ciclo.")
 
+def hilo_premium_rapido(video_path):
+    print(f"[LOG] ⭐ Usuario Premium detectado. Subida forzada en 60 segundos...")
+    time.sleep(60)
+    subir_a_tiktok(video_path, es_premium=True)
+
+# --- MANEJADORES DE TELEGRAM ---
 @bot.message_handler(content_types=['video', 'document'])
-def handle_incoming_video(message):
+def recibir_video(message):
     try:
-        f_id = message.video.file_id if message.video else message.document.file_id
-        f_info = bot.get_file(f_id)
-        downloaded = bot.download_file(f_info.file_path)
+        file_id = message.video.file_id if message.video else message.document.file_id
+        file_info = bot.get_file(file_id)
+        descargado = bot.download_file(file_info.file_path)
         
-        save_path = os.path.join(VID_FOLDER, f"v_{int(time.time())}.mp4")
-        with open(save_path, 'wb') as f:
-            f.write(downloaded)
+        # Guardamos con timestamp para mantener el orden
+        ruta = os.path.join(CARPETA_VIDEOS, f"vid_{int(time.time())}.mp4")
+        with open(ruta, 'wb') as f:
+            f.write(descargado)
         
-        cap = message.caption if message.caption else ""
-        if f"/prem {PASS_PREM}" in cap:
-            bot.reply_to(message, "⭐ PREM: Skip mod. Uploading now.")
-            threading.Thread(target=lambda: (time.sleep(60), upload_engine(save_path, True)), daemon=True).start()
+        caption = message.caption if message.caption else ""
+        
+        # Evaluar prioridad
+        if f"/prem {PASSWORD_SISTEMA}" in caption:
+            bot.reply_to(message, "⭐ **ACCESO PREMIUM**. Tu vídeo se publicará en aproximadamente 1 minuto.")
+            threading.Thread(target=hilo_premium_rapido, args=(ruta,), daemon=True).start()
         else:
-            video_queue.append(save_path)
-            bot.reply_to(message, f"✅ Queued. Position: {len(video_queue)}")
+            cola_normal.append(ruta)
+            bot.reply_to(message, f"✅ Vídeo guardado correctamente.\n📊 Posición en la cola: {len(cola_normal)}\n⏱️ Tiempo estimado: Se publicará por orden de llegada (1 vídeo cada 5-7h).")
+            
     except Exception as e:
-        print(f"!! Error: {e}")
+        print(f"Error procesando vídeo de Telegram: {e}")
+        bot.reply_to(message, "Hubo un fallo al descargar tu vídeo. Inténtalo de nuevo.")
 
+# --- INICIO DEL SISTEMA ---
 if __name__ == "__main__":
-    reload_queue()
-    threading.Thread(target=scheduler_loop, daemon=True).start()
-    print(">> Service Live.")
+    print("=============================================")
+    print("   🚀 SISTEMA TIKTOK AUTÓNOMO 2026 ACTIVO")
+    print("   MOTOR: Playwright (Perfil Persistente)")
+    print(f"   MODO OCULTO: {'Activado' if MODO_OCULTO else 'Desactivado (Visible)'}")
+    print("=============================================")
+    
+    # 1. Recuperar cola de archivos existentes
+    recuperar_cola_perdida()
+    
+    # 2. Iniciar el reloj de subidas normales (Background)
+    threading.Thread(target=hilo_programador_normal, daemon=True).start()
+    
+    # 3. Mantener el bot a la escucha
+    print("[LOG] Bot de Telegram escuchando...")
     while True:
         try:
-            bot.infinity_polling(timeout=60)
-        except:
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"[!] Error de conexión en Telegram: {e}. Reconectando en 5s...")
             time.sleep(5)

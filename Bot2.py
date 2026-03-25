@@ -7,187 +7,222 @@ import random
 from collections import deque
 from playwright.sync_api import sync_playwright
 
-# --- CONFIGURATION ---
-API_TOKEN = 'YOUR_BOT_TOKEN_HERE'
-ADMIN_ID = "YOUR_TELEGRAM_ID_HERE"
-ACCESS_KEY = "1234"
-HEADLESS = False  # Set to True for server deployment
+# --- CONFIGURACIÓN PRINCIPAL ---
+TOKEN_TELEGRAM = 'TU TOKEN DE TELEGRAM'
+PASSWORD_SISTEMA = "1234"
+MODO_OCULTO = False
 
-BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-VIDEO_DIR = os.path.join(BASE_PATH, 'cola_videos')
-SESSION_DIR = os.path.join(BASE_PATH, "tiktok_session")
+# ⚠️ OBLIGATORIO: Pon tu ID numérico de Telegram (búscalo en @userinfobot)
+ADMIN_CHAT_ID = "TU ID" 
 
-# Global instances
-bot = telebot.TeleBot(API_TOKEN, threaded=True)
-queue = deque()
-io_lock = threading.Lock()
-approval_state = {"status": "IDLE"}
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CARPETA_VIDEOS = os.path.join(BASE_DIR, 'cola_videos')
+PERFIL_DIR = os.path.join(BASE_DIR, "tiktok_perfil_bot")
 
-if not os.path.exists(VIDEO_DIR):
-    os.makedirs(VIDEO_DIR)
+browser_lock = threading.Lock()
+cola_normal = deque()
 
-# --- UTILS ---
-def sync_local_queue():
-    """Initial scan to recover pending videos on startup."""
-    files = [f for f in os.listdir(VIDEO_DIR) if f.endswith('.mp4')]
-    files.sort(key=lambda x: os.path.getmtime(os.path.join(VIDEO_DIR, x)))
-    for f in files:
-        full_path = os.path.join(VIDEO_DIR, f)
-        if full_path not in queue:
-            queue.append(full_path)
-    if queue:
-        print(f"[*] Queue synced: {len(queue)} items ready.")
+# Estado global para la moderación
+estado_aprobacion = {"estado": "LIBRE"} 
 
-# --- TELEGRAM MODERATION ---
-def dispatch_moderation(file_path):
-    approval_state["status"] = "PENDING"
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("✅ Approve", callback_data="post_ok"),
-        InlineKeyboardButton("❌ Discard", callback_data="post_no")
+if not os.path.exists(CARPETA_VIDEOS):
+    os.makedirs(CARPETA_VIDEOS)
+
+bot = telebot.TeleBot(TOKEN_TELEGRAM, threaded=True)
+
+# --- SISTEMA DE AUTO-RECUPERACIÓN ---
+def recuperar_cola_perdida():
+    archivos = [f for f in os.listdir(CARPETA_VIDEOS) if f.endswith('.mp4')]
+    archivos.sort(key=lambda x: os.path.getmtime(os.path.join(CARPETA_VIDEOS, x)))
+    for archivo in archivos:
+        ruta = os.path.join(CARPETA_VIDEOS, archivo)
+        if ruta not in cola_normal:
+            cola_normal.append(ruta)
+    if cola_normal:
+        print(f"[LOG] ♻️ Recuperados {len(cola_normal)} vídeos pendientes.")
+
+# --- MODERACIÓN DE TELEGRAM ---
+def pedir_aprobacion_admin(video_path):
+    estado_aprobacion["estado"] = "PENDIENTE"
+    markup = InlineKeyboardMarkup()
+    markup.row_width = 2
+    markup.add(
+        InlineKeyboardButton("✅ Aceptar", callback_data="aceptar"),
+        InlineKeyboardButton("❌ Rechazar", callback_data="rechazar")
     )
     
     try:
-        with open(file_path, 'rb') as video:
+        with open(video_path, 'rb') as video:
             bot.send_video(
-                ADMIN_ID, video, 
-                caption=f"🛡️ MODERATION REQUIRED\nFile: {os.path.basename(file_path)}\nSlot: T-60min", 
-                reply_markup=kb
+                ADMIN_CHAT_ID, 
+                video, 
+                caption=f"🛡️ **FILTRO DE MODERACIÓN**\n\nEste vídeo toca subirse en 1 HORA.\nArchivo: `{os.path.basename(video_path)}`\n\n¿Lo publicamos?", 
+                reply_markup=markup,
+                parse_mode="Markdown"
             )
     except Exception as e:
-        print(f"[!] Alert failed: {e}")
-        approval_state["status"] = "ERROR"
+        print(f"[!] Error contactando al Admin: {e}. ¿Iniciaste el chat con el bot?")
+        estado_aprobacion["estado"] = "ERROR"
 
 @bot.callback_query_handler(func=lambda call: True)
-def handle_approval(call):
-    if approval_state["status"] != "PENDING":
-        bot.answer_callback_query(call.id, "Request expired.")
+def callback_query(call):
+    if estado_aprobacion["estado"] != "PENDIENTE":
+        bot.answer_callback_query(call.id, "Esta solicitud ya fue procesada.")
         return
         
-    if call.data == "post_ok":
-        approval_state["status"] = "APPROVED"
-        bot.edit_message_caption("✅ Approved. Publishing in 1h.", call.message.chat.id, call.message.message_id)
-    elif call.data == "post_no":
-        approval_state["status"] = "REJECTED"
-        bot.edit_message_caption("❌ Discarded. Moving to next.", call.message.chat.id, call.message.message_id)
+    if call.data == "aceptar":
+        estado_aprobacion["estado"] = "ACEPTADO"
+        bot.edit_message_caption(caption="✅ **ACEPTADO**.\nEl vídeo está en cola de publicación. Saldrá en 1 hora.", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
+    elif call.data == "rechazar":
+        estado_aprobacion["estado"] = "RECHAZADO"
+        bot.edit_message_caption(caption="❌ **RECHAZADO**.\nBuscando el siguiente vídeo en la cola...", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
 
-# --- CORE UPLOADER ---
-def tiktok_executor(video_path, is_priority=False):
-    tag = "PRIORITY" if is_priority else "NORMAL"
+# --- MOTOR DE SUBIDA (VERIFICACIÓN REAL) ---
+def subir_a_tiktok(video_path, es_premium=False):
+    tipo = "PREMIUM" if es_premium else "NORMAL"
     
-    if not os.path.exists(video_path): return
+    if not os.path.exists(video_path):
+        return
 
-    with io_lock:
-        print(f"\n[ENGINE] [{tag}] Uploading: {os.path.basename(video_path)}")
+    with browser_lock:
+        print(f"\n[LOG] [{tipo}] Iniciando subida: {os.path.basename(video_path)}")
         try:
             with sync_playwright() as p:
-                ctx = p.chromium.launch_persistent_context(
-                    user_data_dir=SESSION_DIR,
-                    headless=HEADLESS,
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=PERFIL_DIR,
+                    headless=MODO_OCULTO,
                     channel="chrome",
                     args=["--disable-blink-features=AutomationControlled"]
                 )
                 
-                page = ctx.new_page()
-                page.goto("https://www.tiktok.com/creator-center/upload?lang=en", timeout=60000)
+                page = context.new_page()
+                page.goto("https://www.tiktok.com/creator-center/upload?lang=es", timeout=60000)
                 page.wait_for_timeout(5000)
                 
                 if "login" in page.url:
-                    print(f"[!] [{tag}] Error: Active session not found.")
-                    if not is_priority: queue.appendleft(video_path)
-                    ctx.close()
+                    print(f"[LOG] ❌ [{tipo}] ERROR CRÍTICO: Sesión cerrada.")
+                    if not es_premium: cola_normal.appendleft(video_path)
                     return
 
                 page.locator("input[type='file']").set_input_files(video_path)
-                btn_post = page.locator('button:has-text("Post"), button:has-text("Publicar")').first
-                btn_post.wait_for(state="visible", timeout=30000)
                 
-                # Polling for upload completion
+                boton_publicar = page.locator('button:has-text("Publicar"), button:has-text("Post")').first
+                boton_publicar.wait_for(state="visible", timeout=30000)
+                
                 for _ in range(300):
-                    if not btn_post.is_disabled(): break
+                    if not boton_publicar.is_disabled():
+                        break
                     time.sleep(1)
                 
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(1000)
-                btn_post.click(force=True)
                 
-                btn_post.wait_for(state="hidden", timeout=120000)
-                print(f"[SUCCESS] [{tag}] Content live.")
-                time.sleep(4)
-                ctx.close()
+                boton_publicar.click(force=True)
+                boton_publicar.wait_for(state="hidden", timeout=120000)
+                print(f"[LOG] ✅ [{tipo}] ÉXITO: Vídeo publicado.")
+                page.wait_for_timeout(4000)
 
                 if os.path.exists(video_path):
                     os.remove(video_path)
 
         except Exception as e:
-            print(f"[ERROR] [{tag}] Runtime error: {e}")
-            if not is_priority: queue.appendleft(video_path)
+            print(f"[LOG] ❌ [{tipo}] FALLO TÉCNICO: {e}")
+            if not es_premium:
+                cola_normal.appendleft(video_path)
 
-# --- SCHEDULING ---
-def scheduler_loop():
+# --- LÓGICA DE TIEMPOS (EMBUDO DE MODERACIÓN) ---
+def hilo_programador_normal():
     while True:
-        delay = random.randint(18000, 25200) # 5-7h
-        pre_post_window = delay - 3600
+        # Calcular el tiempo total y restar 1 hora (3600 segundos) para la moderación
+        segundos_totales = random.randint(18000, 25200)
+        tiempo_previo = segundos_totales - 3600
         
-        print(f"[*] Next slot in {delay/3600:.2f}h. Reviewing in {pre_post_window/3600:.2f}h.")
-        time.sleep(pre_post_window)
+        print(f"\n[LOG] 🕒 Ciclo iniciado. Subida en {segundos_totales/3600:.2f}h. Te pediré permiso en {tiempo_previo/3600:.2f}h.")
+        time.sleep(tiempo_previo)
         
-        selected_vid = None
-        while queue:
-            candidate = queue.popleft()
-            dispatch_moderation(candidate)
+        video_aprobado = None
+        
+        # Bucle de filtrado
+        while cola_normal:
+            video_candidato = cola_normal.popleft()
+            print(f"[LOG] 🛡️ Enviando {os.path.basename(video_candidato)} a revisión...")
             
-            while approval_state["status"] == "PENDING":
+            pedir_aprobacion_admin(video_candidato)
+            
+            # Esperar a que pulses el botón en Telegram
+            while estado_aprobacion["estado"] == "PENDIENTE":
                 time.sleep(2)
                 
-            if approval_state["status"] == "APPROVED":
-                selected_vid = candidate
-                approval_state["status"] = "IDLE"
-                break
-            elif approval_state["status"] == "REJECTED":
-                if os.path.exists(candidate): os.remove(candidate)
-                approval_state["status"] = "IDLE"
-            elif approval_state["status"] == "ERROR":
-                queue.appendleft(candidate)
-                approval_state["status"] = "IDLE"
+            if estado_aprobacion["estado"] == "ACEPTADO":
+                video_aprobado = video_candidato
+                estado_aprobacion["estado"] = "LIBRE"
+                break # Salimos del bucle de filtrado
+                
+            elif estado_aprobacion["estado"] == "RECHAZADO":
+                if os.path.exists(video_candidato):
+                    os.remove(video_candidato)
+                print("[LOG] 🗑️ Vídeo rechazado por el Admin y eliminado físicamente.")
+                estado_aprobacion["estado"] = "LIBRE"
+                # El bucle while continúa y saca el siguiente vídeo de la cola instantáneamente
+            
+            elif estado_aprobacion["estado"] == "ERROR":
+                # Si falla el envío a Telegram, devolvemos el vídeo y abortamos el ciclo
+                cola_normal.appendleft(video_candidato)
+                estado_aprobacion["estado"] = "LIBRE"
                 break
 
-        if selected_vid:
+        if video_aprobado:
+            print("[LOG] ✅ Vídeo bloqueado y listo. Esperando la última hora (3600s) para publicar...")
             time.sleep(3600)
-            tiktok_executor(selected_vid)
+            subir_a_tiktok(video_aprobado, es_premium=False)
         else:
+            print("[LOG] 🚫 No hay más vídeos en cola o rechazaste todos. Saltando este ciclo.")
+            # Esperamos la hora restante para mantener el ciclo realista y no spamear
             time.sleep(3600)
 
-# --- TELEGRAM HANDLERS ---
+def hilo_premium_rapido(video_path):
+    print(f"[LOG] ⭐ Usuario Premium. Subiendo en 60s sin moderación...")
+    time.sleep(60)
+    subir_a_tiktok(video_path, es_premium=True)
+
+# --- RECEPTOR DE TELEGRAM ---
 @bot.message_handler(content_types=['video', 'document'])
-def on_video_received(message):
+def recibir_video(message):
     try:
-        f_id = message.video.file_id if message.video else message.document.file_id
-        f_info = bot.get_file(f_id)
-        raw_data = bot.download_file(f_info.file_path)
+        file_id = message.video.file_id if message.video else message.document.file_id
+        file_info = bot.get_file(file_id)
+        descargado = bot.download_file(file_info.file_path)
         
-        f_path = os.path.join(VIDEO_DIR, f"v_{int(time.time())}.mp4")
-        with open(f_path, 'wb') as f:
-            f.write(raw_data)
+        ruta = os.path.join(CARPETA_VIDEOS, f"vid_{int(time.time())}.mp4")
+        with open(ruta, 'wb') as f:
+            f.write(descargado)
         
-        caption = message.caption or ""
-        if f"/prem {ACCESS_KEY}" in caption:
-            bot.reply_to(message, "⭐ Priority access. Posting in 60s...")
-            threading.Thread(target=lambda: (time.sleep(60), tiktok_executor(f_path, True)), daemon=True).start()
+        caption = message.caption if message.caption else ""
+        
+        if f"/prem {PASSWORD_SISTEMA}" in caption:
+            bot.reply_to(message, "⭐ **ACCESO PREMIUM**. Saltando filtro de moderación. Subida en 1 minuto.")
+            threading.Thread(target=hilo_premium_rapido, args=(ruta,), daemon=True).start()
         else:
-            queue.append(f_path)
-            bot.reply_to(message, f"✅ Added to queue. Position: {len(queue)}")
+            cola_normal.append(ruta)
+            bot.reply_to(message, f"✅ Recibido. Estás en la posición {len(cola_normal)} de la cola.")
             
     except Exception as e:
-        print(f"Recv error: {e}")
+        print(f"Error procesando: {e}")
 
+# --- INICIO ---
 if __name__ == "__main__":
-    print("--- TIKTOK AUTOMATION SERVICE STARTING ---")
-    sync_local_queue()
-    threading.Thread(target=scheduler_loop, daemon=True).start()
+    print("=============================================")
+    print("   🚀 BOT TIKTOK: PRODUCCIÓN BLINDADA")
+    print("=============================================")
+    if ADMIN_CHAT_ID == "PON_TU_ID_NUMERICO_AQUI":
+        print("⚠️ ALERTA: No has configurado tu ADMIN_CHAT_ID. La moderación fallará.")
+        
+    recuperar_cola_perdida()
+    threading.Thread(target=hilo_programador_normal, daemon=True).start()
     
+    print("[LOG] Bot a la escucha...")
     while True:
         try:
-            bot.infinity_polling(timeout=60)
-        except:
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
             time.sleep(5)
